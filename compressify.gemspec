@@ -10,7 +10,7 @@ Gem::Specification.new do |spec|
 
   spec.summary       = "Automatic Active Storage compression for Rails."
   spec.description   = "Compressify reduces Active Storage storage costs by compressing uploaded images with libvips and optionally transcoding videos with ffmpeg in background jobs."
-  spec.homepage      = "https://github.com/kenroyreid/compressify"
+  spec.homepage      = "https://github.com/Kenny421/compressify"
   spec.license       = "MIT"
   spec.required_ruby_version = ">= 3.1.0"
 

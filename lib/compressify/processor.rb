@@ -36,6 +36,7 @@ module Compressify
 
       max_bytes = Compressify.config.max_download_bytes
       if blob.byte_size && blob.byte_size > max_bytes
+        # Giant blobs can wait outside. The job queue is not a sauna.
         log_warn("Skip: blob too large (#{blob.byte_size} bytes) attachment_id=#{@attachment.id}")
         return
       end
@@ -74,6 +75,7 @@ module Compressify
       end
 
       if Compressify.config.dedupe_enabled && already_done?(blob)
+        # If we already made this exact sandwich, no need to toast the bread again.
         log_info("Skip: already compressed for these options attachment_id=#{@attachment.id} target=#{@target_name}")
         return
       end
@@ -145,6 +147,7 @@ module Compressify
     end
 
     def fingerprint_for(source_blob)
+      # Same source + same options should lead to the same fingerprint every time.
       payload = {
         v: Compressify::VERSION,
         source_blob_key: source_blob.key,

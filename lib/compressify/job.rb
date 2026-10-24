@@ -26,9 +26,9 @@ module Compressify
       attachment = ActiveStorage::Attachment.find_by(id: attachment_id)
       return unless attachment
 
-      # Serialize concurrent jobs touching the same attachment row.
+      # Serialize jobs per attachment row so two workers do not "help" at the same time.
       attachment.with_lock do
-        # If attachment changed since enqueue, this job is stale.
+        # If the blob changed since enqueue, this job missed its moment.
         if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
           log_info("Skip stale job attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
           next
@@ -37,7 +37,7 @@ module Compressify
         lock_key = processing_lock_key(attachment: attachment, options: options)
         with_processing_lock(lock_key) do
           with_media_concurrency_slot(attachment, blob_id: blob_id, options: options) do
-            # Re-check inside lock in case another worker swapped blob while we waited.
+            # Re-check inside the lock. Queues are fast, but not psychic.
             if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
               log_info("Skip stale job inside lock attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
               next
