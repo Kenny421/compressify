@@ -14,6 +14,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Select legacy dependency set on Ruby 3.1
+        if: matrix.ruby == '3.1'
+        run: echo 'BUNDLE_GEMFILE=gemfiles/ruby31.gemfile' >> "$GITHUB_ENV"
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ matrix.ruby }}
