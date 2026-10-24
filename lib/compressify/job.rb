@@ -31,24 +31,24 @@ module Compressify
       # Serialize jobs per attachment row so two workers do not "help" at the same time.
       begin
         attachment.with_lock do
-        # If the blob changed since enqueue, this job missed its moment.
-        if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
-          log_info("Skip stale job attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
-          next
-        end
-
-        lock_key = processing_lock_key(attachment: attachment, options: options)
-        with_processing_lock(lock_key) do
-          with_media_concurrency_slot(attachment, blob_id: blob_id, options: options) do
-            # Re-check inside the lock. Queues are fast, but not psychic.
-            if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
-              log_info("Skip stale job inside lock attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
-              next
-            end
-
-            run_processor(attachment, options)
+          # If the blob changed since enqueue, this job missed its moment.
+          if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
+            log_info("Skip stale job attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
+            next
           end
-        end
+
+          lock_key = processing_lock_key(attachment: attachment, options: options)
+          with_processing_lock(lock_key) do
+            with_media_concurrency_slot(attachment, blob_id: blob_id, options: options) do
+              # Re-check inside the lock. Queues are fast, but not psychic.
+              if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
+                log_info("Skip stale job inside lock attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
+                next
+              end
+
+              run_processor(attachment, options)
+            end
+          end
         end
       rescue StandardError
         # The DB transaction has rolled back; clean up new media that was
