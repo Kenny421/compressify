@@ -14,7 +14,7 @@ module Compressify
       relation = relation.where("created_at < ?", until_at) if until_at
       metadata_key = Compressify.config.metadata_key.to_s
       # Prefilter across SQLite/PostgreSQL without requiring an optional index.
-      relation = relation.where("metadata LIKE ?", "%\\\"#{metadata_key}\\\"%")
+      relation = relation.where("metadata LIKE ?", "%\"#{metadata_key}\"%")
 
       totals = { count: 0, source_bytes: 0, compressed_bytes: 0,
                  bytes_saved: 0, processing_ms: 0, timed_count: 0,
