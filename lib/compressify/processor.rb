@@ -28,6 +28,29 @@ module Compressify
     def initialize(attachment:, options: {})
       @attachment = attachment
       @options = (options || {}).deep_symbolize_keys
+      @pending_purge_blob_ids = []
+      @uploaded_blobs = []
+    end
+
+    attr_reader :pending_purge_blob_ids
+
+    # Only called by the job after the attachment transaction has committed.
+    def enqueue_pending_purges!
+      pending_purge_blob_ids.uniq.each do |blob_id|
+        Compressify::PurgeOriginalJob.perform_later(blob_id: blob_id)
+      end
+    end
+
+    # Called after a failed transaction has rolled back, including a stale-record
+    # failure. The blob DB rows roll back, but the storage upload may not.
+    def cleanup_failed_outputs!
+      @uploaded_blobs.each do |blob|
+        begin
+          blob.service.delete(blob.key)
+        rescue StandardError => e
+          log_warn("Failed to clean up rolled-back upload key=#{blob.key} error=#{e.class}: #{e.message}")
+        end
+      end
     end
 
     def call
@@ -329,10 +352,12 @@ module Compressify
         identify: false
       )
 
+      @uploaded_blobs << new_blob
       record = @attachment.record
 
       if @replace_mode
         old_blob = @attachment.blob
+        refresh_attachment_record_for_swap!(record)
         @attachment.update!(blob: new_blob)
 
         maybe_purge_old_blob(old_blob) if Compressify.config.purge_original
@@ -384,13 +409,18 @@ module Compressify
 
     def maybe_purge_old_blob(old_blob)
       return unless old_blob
-      # Only purge if nobody else is using it.
-      if old_blob.attachments.reload.none?
-        # Delete from storage before destroying the DB record so failures remain retryable.
-        Compressify::PurgeOriginalJob.perform_later(blob_id: old_blob.id)
-      end
+      # Queue only after a successful commit in Compressify::Job. Enqueueing
+      # inside attachment.with_lock races the transaction and can miss purges.
+      @pending_purge_blob_ids << old_blob.id if old_blob.attachments.reload.none?
     rescue => e
-      log_warn("Could not purge old blob (continuing) old_blob_id=#{old_blob&.id} error=#{e.class}: #{e.message}")
+      log_warn("Could not queue old blob for purge old_blob_id=#{old_blob&.id} error=#{e.class}: #{e.message}")
+    end
+
+    def refresh_attachment_record_for_swap!(record)
+      # ActiveStorage::Attachment belongs_to(:record, touch: true) can attempt
+      # to touch a cached Book/User with an outdated optimistic-lock version.
+      # Reload immediately before swapping to use its current lock_version.
+      record.reload if record.respond_to?(:persisted?) && record.persisted? && record.respond_to?(:reload)
     end
 
     def try_reuse_derivative!(source_blob:, mode:, options_snapshot:)
@@ -443,6 +473,7 @@ module Compressify
         old_blob = @attachment.blob
         return if old_blob&.id == existing_blob.id
 
+        refresh_attachment_record_for_swap!(record)
         @attachment.update!(blob: existing_blob)
         maybe_purge_old_blob(old_blob) if Compressify.config.purge_original
       else
