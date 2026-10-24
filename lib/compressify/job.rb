@@ -102,6 +102,39 @@ module Compressify
       limit = concurrency_limit_for_attachment(attachment)
       return yield unless limit.to_i.positive?
 
+      if postgres_semaphore_enabled?
+        acquired = false
+        ActiveStorage::Attachment.connection_pool.with_connection do |connection|
+          acquired = Compressify::PostgresSemaphore.with_slot(
+            scope: media_scope_for_attachment(attachment),
+            limit: limit, connection: connection,
+            namespace: Compressify.config.concurrency_namespace
+          ) { yield }
+        end
+        unless acquired
+          log_info("Requeue due to distributed concurrency cap attachment_id=#{attachment.id} limit=#{limit}")
+          requeue_with_backoff(attachment: attachment, blob_id: blob_id || attachment.blob_id, options: options)
+        end
+        return
+      end
+
+      with_cache_concurrency_slot(attachment, limit: limit, blob_id: blob_id, options: options) { yield }
+    end
+
+    def postgres_semaphore_enabled?
+      backend = Compressify.config.concurrency_backend.to_sym
+      raise ArgumentError, "Unsupported Compressify concurrency backend: #{backend}" unless
+        %i[auto cache postgres].include?(backend)
+      return false if backend == :cache
+
+      config = ActiveStorage::Attachment.connection_db_config
+      is_postgres = config && config.adapter.to_s.downcase.include?("postgres")
+      raise Compressify::Error, "concurrency_backend=:postgres requires PostgreSQL" if
+        backend == :postgres && !is_postgres
+      !!is_postgres
+    end
+
+    def with_cache_concurrency_slot(attachment, limit:, blob_id:, options:)
       cache_store = rails_cache_store
       return yield unless cache_store
 
