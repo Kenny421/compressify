@@ -17,5 +17,7 @@ class ConfigDefaultsTest < Minitest::Test
     assert_equal true, cfg.reuse_existing_derivatives
     assert_equal 80, cfg.default_image_options[:quality]
     assert_equal false, cfg.skip_if_no_resize_needed
+    assert_equal true, cfg.skip_larger_output
+    assert_equal false, cfg.postgres_fingerprint_lookup
   end
 end
