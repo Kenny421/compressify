@@ -10,7 +10,8 @@ module Compressify
                   :adaptive_quality_enabled, :adaptive_quality_min,
                   :adaptive_quality_large_image_pixels, :adaptive_quality_large_file_bytes,
                   :reuse_existing_derivatives, :tempfile_dir,
-                  :skip_if_no_resize_needed, :skip_larger_output, :postgres_fingerprint_lookup
+                  :skip_if_no_resize_needed, :skip_larger_output, :postgres_fingerprint_lookup,
+                  :concurrency_backend, :concurrency_namespace
 
     def initialize
       # Master switch for background processing.
@@ -28,6 +29,11 @@ module Compressify
       # Optional in-flight caps per media type. Nil disables the cap.
       @image_max_concurrency = 8
       @video_max_concurrency = 2
+
+      # :auto uses PostgreSQL advisory locks when available, otherwise cache.
+      # :postgres requires PostgreSQL. :cache uses Rails.cache (must be shared).
+      @concurrency_backend = :auto
+      @concurrency_namespace = "compressify"
 
       # Delay used when re-enqueuing after hitting a concurrency cap.
       @concurrency_retry_delay = 5.seconds
