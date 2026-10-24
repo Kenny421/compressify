@@ -253,6 +253,7 @@ Recommended production pattern:
 - Point `tempfile_dir` at fast local storage if large uploads are common
 - Leave dedupe and stale-job protections enabled
 - Set conservative worker counts to fit your CPU/RAM budget (for example, start at 1 FFmpeg job on a small VPS)
+- Optionally set `video: { threads: 2 }` (or `config.default_video_options[:threads] = 2`) to cap FFmpeg encoder threads per job
 - Benchmark different FFmpeg presets/CRF values rather than expecting faster encoding solely from Ruby changes
 
 ## Storage safeguards and faster PostgreSQL reuse lookups
