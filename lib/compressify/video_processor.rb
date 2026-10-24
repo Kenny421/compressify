@@ -54,6 +54,7 @@ module Compressify
       args = []
       args += ["-preset", opts[:preset].to_s] if opts[:preset].present?
       args += ["-crf", opts[:crf].to_i.to_s] if opts[:crf].present?
+      args += ["-threads", opts[:threads].to_i.to_s] if opts[:threads].to_i.positive?
 
       scale = build_scale(opts)
       args += ["-vf", scale] if scale.present?
