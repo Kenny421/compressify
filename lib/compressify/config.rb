@@ -91,6 +91,7 @@ module Compressify
         audio_codec: "aac",
         crf: 28,
         preset: "medium",
+        threads: nil,
         max_width: nil,
         max_height: nil,
         extra_args: []
