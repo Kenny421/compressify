@@ -30,9 +30,11 @@ module Compressify
       @options = (options || {}).deep_symbolize_keys
       @pending_purge_blob_ids = []
       @uploaded_blobs = []
+      @started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @result = { status: "skipped", reason: "not_eligible" }
     end
 
-    attr_reader :pending_purge_blob_ids
+    attr_reader :pending_purge_blob_ids, :result
 
     # Only called by the job after the attachment transaction has committed.
     def enqueue_pending_purges!
@@ -321,6 +323,8 @@ module Compressify
       if @replace_mode && Compressify.config.skip_larger_output &&
           @options[:allow_larger_output] != true &&
           source_byte_size && output_byte_size >= source_byte_size
+        @result = { status: "skipped", reason: "larger_output", mode: mode.to_s,
+                    source_bytes: source_byte_size, output_bytes: output_byte_size }
         log_info(
           "Skip larger output attachment_id=#{attachment_id_for_log} " \
           "source_bytes=#{source_byte_size} output_bytes=#{output_byte_size}"
@@ -342,6 +346,7 @@ module Compressify
         "compressed_byte_size" => output_byte_size,
         "bytes_saved" => savings[:bytes_saved],
         "percent_saved" => savings[:percent_saved],
+        "processing_ms" => ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - @started_at) * 1_000).round(2),
         "processed_at" => Time.now.utc.iso8601
       }
 
@@ -401,6 +406,8 @@ module Compressify
         target_assoc.attach(new_blob)
       end
 
+      @result = { status: "compressed", mode: mode.to_s, source_bytes: source_byte_size,
+                  output_bytes: output_byte_size, bytes_saved: savings[:bytes_saved] }
       log_info(
         "Compressed #{mode} attachment_id=#{attachment_id_for_log} target=#{@target_name} " \
         "source_bytes=#{source_byte_size} compressed_bytes=#{output_byte_size} " \
@@ -432,6 +439,8 @@ module Compressify
       return false unless reusable
 
       attach_existing_blob!(source_blob: source_blob, existing_blob: reusable, mode: mode, options_snapshot: options_snapshot, fingerprint: fp)
+      @result = { status: "reused", mode: mode.to_s, source_bytes: blob_byte_size(source_blob),
+                  output_bytes: blob_byte_size(reusable) }
       log_info("Reuse: attached existing #{mode} derivative attachment_id=#{@attachment.id} reusable_blob_id=#{reusable.id}")
       true
     rescue => e
