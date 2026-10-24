@@ -111,6 +111,68 @@ class JobIdempotencyTest < Minitest::Test
     Compressify.config.video_max_concurrency = original_limit
   end
 
+  def test_original_purge_is_enqueued_only_after_attachment_transaction_commits
+    attachment = FakeAttachment.new(31, 44, FakeBlob.new("image/jpeg", FakeFilename.new("jpg")))
+    in_transaction = false
+    attachment.define_singleton_method(:with_lock) do |&block|
+      in_transaction = true
+      block.call
+    ensure
+      in_transaction = false
+    end
+
+    processor = Object.new
+    enqueued = false
+    processor.define_singleton_method(:enqueue_pending_purges!) do
+      raise "Purge queued before commit" if in_transaction
+      enqueued = true
+    end
+
+    job = Compressify::Job.new
+    job.define_singleton_method(:run_processor) { |*_args| @processor = processor }
+
+    patch_singleton_method(ActiveStorage::Attachment, :find_by, ->(id:) { id == 31 ? attachment : nil }) do
+      job.perform(attachment_id: 31, blob_id: 44, options: {})
+    end
+
+    assert enqueued
+  end
+
+  def test_failed_attachment_transaction_cleans_up_without_enqueuing_purge
+    attachment = FakeAttachment.new(32, 45, FakeBlob.new("image/jpeg", FakeFilename.new("jpg")))
+    in_transaction = false
+    attachment.define_singleton_method(:with_lock) do |&block|
+      in_transaction = true
+      block.call
+    ensure
+      in_transaction = false
+    end
+
+    cleaned_up = false
+    purged = false
+    processor = Object.new
+    processor.define_singleton_method(:cleanup_failed_outputs!) do
+      raise "Cleanup happened inside transaction" if in_transaction
+      cleaned_up = true
+    end
+    processor.define_singleton_method(:enqueue_pending_purges!) { purged = true }
+
+    job = Compressify::Job.new
+    job.define_singleton_method(:run_processor) do |*_args|
+      @processor = processor
+      raise ActiveRecord::StaleObjectError.new(Object.new, "touch")
+    end
+
+    patch_singleton_method(ActiveStorage::Attachment, :find_by, ->(id:) { id == 32 ? attachment : nil }) do
+      assert_raises(ActiveRecord::StaleObjectError) do
+        job.perform(attachment_id: 32, blob_id: 45, options: {})
+      end
+    end
+
+    assert cleaned_up
+    refute purged
+  end
+
   private
 
   def patch_singleton_method(klass, method_name, callable)
