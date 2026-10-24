@@ -16,9 +16,8 @@ module Compressify
       out_format = context_send(:extension_for_content_type, blob.content_type) || "jpg" if out_format.blank? || out_format == "img"
       out_format = "jpg" if out_format == "jpeg"
 
-      Tempfile.create(["compressify-in-", ".#{input_ext}"], context_send(:tempfile_dir)) do |infile|
-        context_send(:download_blob_to_tempfile, blob, infile)
-
+      # Active Storage already downloads into a verified tempfile. Avoid copying it again.
+      blob.open(tmpdir: context_send(:tempfile_dir)) do |infile|
         Tempfile.create(["compressify-out-", ".#{out_format}"], context_send(:tempfile_dir)) do |outfile|
           outfile.binmode
 
