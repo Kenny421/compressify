@@ -173,6 +173,37 @@ class JobIdempotencyTest < Minitest::Test
     refute purged
   end
 
+  def test_success_publishes_structured_compression_metric
+    attachment = FakeAttachment.new(51, 69, FakeBlob.new("image/jpeg", FakeFilename.new("jpg")))
+    processor = Object.new
+    processor.define_singleton_method(:result) do
+      { status: "compressed", mode: "image", source_bytes: 1000,
+        output_bytes: 250, bytes_saved: 750 }
+    end
+    processor.define_singleton_method(:enqueue_pending_purges!) { true }
+
+    job = Compressify::Job.new
+    job.define_singleton_method(:rails_cache_store) { nil }
+    job.define_singleton_method(:run_processor) { |*_args| @processor = processor }
+
+    events = []
+    subscriber = ActiveSupport::Notifications.subscribe("compressify.job") do |*_args, payload|
+      events << payload
+    end
+
+    patch_singleton_method(ActiveStorage::Attachment, :find_by, ->(id:) { id == 51 ? attachment : nil }) do
+      job.perform(attachment_id: 51, blob_id: 69, options: {})
+    end
+
+    assert_equal 1, events.size
+    assert_equal "compressed", events.first[:status]
+    assert_equal "image", events.first[:mode]
+    assert_equal 750, events.first[:bytes_saved]
+    assert events.first[:duration_ms].is_a?(Numeric)
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscriber) if subscriber
+  end
+
   private
 
   def patch_singleton_method(klass, method_name, callable)

@@ -336,6 +336,137 @@ Keep your Active Job worker running and monitor exhausted retries. Already
 orphaned objects from older gem versions require a separate storage audit;
 this update cannot retroactively locate all of them.
 
+
+## Batch optimization for existing uploads
+
+Compressify can now enqueue **existing** attachments in bounded, resumable batches
+instead of only handling newly uploaded files. The default is a **dry run**.
+No original blobs are changed directly by the batch scanner: it schedules
+the same idempotent `Compressify::Job` used for regular uploads. By default,
+the batch uses the model's own `auto_compress` declarations, including its
+format, resize settings, conditions and dynamic option block. Explicit
+`options:` / `OPTIONS_JSON` settings override those declared options.
+
+Preview the first 500 book covers:
+
+```sh
+bundle exec rails compressify:backfill MODEL=Book ATTACHMENT=cover_image
+```
+
+### Short-lived Rails tasks and AsyncAdapter
+
+An Active Job AsyncAdapter queue lives only for the duration of its Rails process.
+Do not enqueue production-sized backfills with AsyncAdapter in a one-off rake task.
+Compressify now detects this and asks you to use a durable backend or inline mode.
+
+For a small local batch, run jobs and original-file purges synchronously:
+
+```sh
+MODEL=Book ATTACHMENT=cover_image LIMIT=20 DRY_RUN=false RUN_INLINE=true bin/rails compressify:backfill
+```
+
+With execution_mode=inline, enqueued indicates inline-executed jobs, not
+necessarily newly compressed files. Existing compressed blobs may be skipped.
+Older compressed blobs do not have processing_ms until newly processed.
+
+For a full backfill, configure Solid Queue workers for compressify_images,
+compressify_videos, and the default queue used to purge original blobs.
+Explicitly enqueue a smaller batch, then resume at the `resume_after_id`
+from the JSON report:
+
+```sh
+bundle exec rails compressify:backfill MODEL=Book ATTACHMENT=cover_image DRY_RUN=false LIMIT=100
+bundle exec rails compressify:backfill MODEL=Book ATTACHMENT=cover_image DRY_RUN=false LIMIT=100 AFTER_ID=12345
+```
+
+Pass custom processor options, e.g. for a legacy image attachment:
+
+```sh
+bundle exec rails compressify:backfill MODEL=Photo ATTACHMENT=image DRY_RUN=false LIMIT=100 OPTIONS_JSON='{"format":"webp","quality":78}'
+```
+
+Or call the API:
+
+```ruby
+Compressify::Batch.enqueue(model: Book, attachment_name: :cover_image, dry_run: true)
+Compressify::Batch.enqueue(model: Book, attachment_name: :cover_image,
+  dry_run: false, limit: 100, after_id: 0, options: { format: :webp, quality: 82 })
+```
+
+The scanner validates the model attachment, skips unsupported/oversized blobs,
+caps each invocation to 10,000 attachment rows, and enqueues an expected
+`blob_id` so replaced attachments cannot be overwritten by stale jobs. The
+`eligible` count is a *candidate* count; the job may still skip an already
+optimized image, or an output that would exceed its original size. For sustained
+backfills, use a durable Active Job backend and monitor queue depth. Scheduling
+many batches concurrently can create excess queue load. Run a dry run and
+test on a few uploads before applying it to production.
+
+## Compression statistics and instrumentation
+
+A read-only snapshot reports savings from **currently retained** compressed
+blobs (those whose Active Storage blob metadata includes Compressify data):
+
+```sh
+bundle exec rails compressify:stats
+bundle exec rails compressify:stats SINCE=2026-10-01T00:00:00Z
+```
+
+```ruby
+Compressify::Statistics.summary
+Compressify::Statistics.summary(since: 7.days.ago)
+```
+
+The result includes `count`, `source_bytes`, `compressed_bytes`,
+`bytes_saved`, `percent_saved`, `by_mode`, and `average_processing_ms`
+(for outputs produced by the new pipeline). Older outputs without timings
+still count toward byte savings. This scans blob metadata and can be expensive
+on large databases; use during off-peak periods. Deleted/replaced derivatives
+are no longer included, so it is **not** a lifetime accounting ledger.
+
+Each compression job also publishes an `ActiveSupport::Notifications`
+event named `compressify.job`, with status (`compressed`, `reused`,
+`skipped`, or `failed`), duration, byte counts, skip reason and error class.
+Attach your own monitoring/analytics subscriber to build cumulative metrics:
+
+```ruby
+ActiveSupport::Notifications.subscribe("compressify.job") do |_name, _start, _finish, _id, payload|
+  Rails.logger.info("Compressify metric: #{payload.slice(:status, :duration_ms, :bytes_saved).inspect}")
+end
+```
+
+No uploaded image bytes or filenames are included in the event payload.
+
+## Cross-worker concurrency control
+
+Compressify now supports PostgreSQL **session advisory-lock slots**, which
+coordinate the image/video concurrency caps across independent Rails
+processes sharing the same PostgreSQL database. They do not require Redis,
+migrations or an additional service:
+
+```ruby
+Compressify.configure do |config|
+  config.concurrency_backend = :auto # default: PostgreSQL advisory slots when PostgreSQL is configured
+  config.concurrency_namespace = "my-rails-app"
+  config.image_max_concurrency = 4
+  config.video_max_concurrency = 1
+end
+```
+
+Use `:postgres` to require a PostgreSQL adapter or `:cache` to always use
+the existing cache-backed slots. On SQLite/other databases, `:auto` falls
+back to the cache backend; a **process-local** cache cannot enforce limits
+across multiple workers. Use a shared atomic cache or PostgreSQL if you
+need cross-process limits. PostgreSQL slots release when a job exits or
+its connection closes, so stale TTL keys cannot permanently block work.
+Excess work is re-enqueued after `concurrency_retry_delay`.
+
+Note: advisory locks prevent more than the configured *number of concurrent
+processors* only if every worker uses the same database/namespace and
+matching limits. They do not substitute for durable queues or stale-blob
+checks. For production, validate with real PostgreSQL and concurrent workers
+before scaling traffic.
+
 ## Failure Behavior and Safety
 
 Compressify is designed to be conservative:

@@ -16,6 +16,10 @@ module Compressify
   module Model
     extend ActiveSupport::Concern
 
+    included do
+      class_attribute :compressify_attachment_rules, instance_accessor: false, default: {}
+    end
+
     class_methods do
       # Adds callbacks that enqueue compression when the attachment changes.
       #
@@ -30,6 +34,11 @@ module Compressify
       def auto_compress(attachment_name, only: [:create, :update], **options, &block)
         attachment_name = attachment_name.to_sym
         dynamic_opts = block
+        # Backfills can reuse the exact options declared on this model.
+        # Reassign instead of mutating inherited class_attribute hashes.
+        self.compressify_attachment_rules = compressify_attachment_rules.merge(
+          attachment_name.to_s => { options: options.deep_dup, dynamic_opts: dynamic_opts }
+        )
 
         # Mark attachment changes during the save transaction so we only enqueue real work.
         after_save do
