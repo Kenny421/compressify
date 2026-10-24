@@ -4,6 +4,10 @@ require "rails/railtie"
 
 module Compressify
   class Railtie < Rails::Railtie
+    rake_tasks do
+      load File.expand_path("../tasks/compressify.rake", __dir__)
+    end
+
     initializer "compressify.include_concerns" do
       ActiveSupport.on_load(:action_controller) do
         include Compressify::Controller
