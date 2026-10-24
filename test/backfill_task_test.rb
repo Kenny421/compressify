@@ -45,7 +45,8 @@ class BackfillTaskTest < Minitest::Test
 
   def test_inline_mode_restores_job_adapters
     ENV["RUN_INLINE"] = "true"
-    job_classes = [Compressify::Job, Compressify::PurgeOriginalJob, ActiveStorage::PurgeJob]
+    job_classes = [Compressify::Job, Compressify::PurgeOriginalJob]
+    job_classes << ActiveStorage::PurgeJob if defined?(ActiveStorage::PurgeJob)
     old_adapters = job_classes.map(&:queue_adapter)
 
     with_fake_batch_report do
