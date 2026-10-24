@@ -221,6 +221,17 @@ class ProcessorSecurityTest < Minitest::Test
     assert_equal ["-preset", "slow", "-crf", "24", "-vf", "scale='min(1280,iw)':-2"], args
   end
 
+  def test_ffmpeg_custom_args_limits_video_threads_when_configured
+    attachment = FakeAttachment.new(
+      blob: FakeBlob.new("source-key", {}, "video/mp4", nil),
+      record: Object.new, record_id: 10, record_type: "Video", name: "clip"
+    )
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+
+    args = processor.send(:ffmpeg_custom_args, { crf: 28, threads: 2 })
+    assert_equal ["-crf", "28", "-threads", "2"], args
+  end
+
   def test_ffmpeg_custom_args_stringifies_array_values_safely
     record = Object.new
     attachment = FakeAttachment.new(
