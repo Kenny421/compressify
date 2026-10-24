@@ -24,6 +24,8 @@ module Compressify
     # blob_id: expected blob id at enqueue time (stale job guard)
     # options: hash for processor (format/quality/etc + attach_to)
     def perform(attachment_id:, blob_id: nil, options: {})
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      metric_error = nil
       @processor = nil
       attachment = ActiveStorage::Attachment.find_by(id: attachment_id)
       return unless attachment
@@ -59,9 +61,30 @@ module Compressify
 
       # Never enqueue the purge before the replacement transaction commits.
       @processor&.enqueue_pending_purges!
+    rescue StandardError => error
+      metric_error = error
+      raise
+    ensure
+      publish_job_metric(started_at: started_at, attachment_id: attachment_id,
+                         blob_id: blob_id, error: metric_error) if started_at
     end
 
     private
+
+    def publish_job_metric(started_at:, attachment_id:, blob_id:, error:)
+      result = @processor&.result || {}
+      payload = {
+        attachment_id: attachment_id, blob_id: blob_id, job_id: job_id,
+        status: error ? "failed" : result.fetch(:status, "skipped"),
+        duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at) * 1_000).round(2),
+        mode: result[:mode], source_bytes: result[:source_bytes],
+        output_bytes: result[:output_bytes], bytes_saved: result[:bytes_saved],
+        skip_reason: result[:reason], error_class: error&.class&.name
+      }
+      ActiveSupport::Notifications.instrument("compressify.job", payload)
+    rescue StandardError => metric_error
+      log_info("Unable to publish compression metric: #{metric_error.class}")
+    end
 
     def run_processor(attachment, options)
       @processor = Compressify::Processor.new(attachment: attachment, options: options)
