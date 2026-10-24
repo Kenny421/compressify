@@ -11,7 +11,7 @@ class BatchTest < Minitest::Test
   end
 
   Blob = Struct.new(:id, :byte_size, :content_type, :filename)
-  Attachment = Struct.new(:id, :blob)
+  Attachment = Struct.new(:id, :blob, :record)
   Filename = Struct.new(:extension_without_delimiter)
 
   class Relation
@@ -91,6 +91,51 @@ class BatchTest < Minitest::Test
     assert_equal [11, 12], enqueued.map { |args| args[:blob_id] }
     assert_equal [1, 2], enqueued.map { |args| args[:attachment_id] }
     assert_equal({ quality: 72 }, enqueued.first[:options])
+  end
+
+  def test_model_rules_supply_format_and_skip_nonmatching_records
+    included = Object.new
+    included.define_singleton_method(:allowed?) { true }
+    included.define_singleton_method(:compressify_normalize_options) do |opts|
+      opts[:resize_to_fill] = [512, 512] if opts.delete(:size) == "512x512!"
+      opts
+    end
+    excluded = Object.new
+    excluded.define_singleton_method(:allowed?) { false }
+    excluded.define_singleton_method(:compressify_normalize_options) { |opts| opts }
+
+    items = [
+      Attachment.new(1, @images.first.blob, included),
+      Attachment.new(2, @images[1].blob, excluded)
+    ]
+    rules = {
+      "image" => {
+        options: { format: :webp, size: "512x512!", if: ->(record) { record.allowed? } },
+        dynamic_opts: nil
+      }
+    }
+    enqueued = []
+    runner = Object.new
+    runner.define_singleton_method(:perform_later) do |**args|
+      enqueued << args
+      Object.new
+    end
+
+    patch_method(Record, :compressify_attachment_rules, -> { rules }) do
+      with_attachments(items) do
+        patch_method(Compressify::Job, :set, ->(**_args) { runner }) do
+          report = Compressify::Batch.enqueue(
+            model: Record, attachment_name: :image, dry_run: false, limit: 2
+          )
+          assert_equal 1, report[:enqueued]
+          assert_equal 1, report[:skipped]
+        end
+      end
+    end
+
+    assert_equal :webp, enqueued.first[:options][:format]
+    assert_equal [512, 512], enqueued.first[:options][:resize_to_fill]
+    refute enqueued.first[:options].key?(:if)
   end
 
   def test_rejects_unbounded_or_invalid_requests
