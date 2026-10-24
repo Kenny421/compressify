@@ -353,6 +353,24 @@ Preview the first 500 book covers:
 bundle exec rails compressify:backfill MODEL=Book ATTACHMENT=cover_image
 ```
 
+### Short-lived Rails tasks and AsyncAdapter
+
+An Active Job AsyncAdapter queue lives only for the duration of its Rails process.
+Do not enqueue production-sized backfills with AsyncAdapter in a one-off rake task.
+Compressify now detects this and asks you to use a durable backend or inline mode.
+
+For a small local batch, run jobs and original-file purges synchronously:
+
+```sh
+MODEL=Book ATTACHMENT=cover_image LIMIT=20 DRY_RUN=false RUN_INLINE=true bin/rails compressify:backfill
+```
+
+With execution_mode=inline, enqueued indicates inline-executed jobs, not
+necessarily newly compressed files. Existing compressed blobs may be skipped.
+Older compressed blobs do not have processing_ms until newly processed.
+
+For a full backfill, configure Solid Queue workers for compressify_images,
+compressify_videos, and the default queue used to purge original blobs.
 Explicitly enqueue a smaller batch, then resume at the `resume_after_id`
 from the JSON report:
 
