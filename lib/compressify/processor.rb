@@ -319,6 +319,7 @@ module Compressify
       savings = compression_savings(source_bytes: source_byte_size, output_bytes: output_byte_size)
 
       if @replace_mode && Compressify.config.skip_larger_output &&
+          @options[:allow_larger_output] != true &&
           source_byte_size && output_byte_size >= source_byte_size
         log_info(
           "Skip larger output attachment_id=#{attachment_id_for_log} " \
