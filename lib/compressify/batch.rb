@@ -51,11 +51,18 @@ module Compressify
           next
         end
 
+        declared_options = model_options(attachment, model: model, name: name)
+        if declared_options.nil?
+          skipped += 1
+          next
+        end
+
+        resolved_options = declared_options.deep_merge(options.deep_symbolize_keys)
         eligible += 1
         next if dry_run
 
         job = Compressify::Job.set(queue: Compressify.queue_for_attachment(attachment))
-          .perform_later(attachment_id: attachment.id, blob_id: blob.id, options: options.deep_symbolize_keys)
+          .perform_later(attachment_id: attachment.id, blob_id: blob.id, options: resolved_options)
         enqueued += 1 if job
       end
 
@@ -63,5 +70,28 @@ module Compressify
         skipped: skipped, enqueued: enqueued, last_id: last_id,
         resume_after_id: last_id, limit: limit }
     end
+
+    def self.model_options(attachment, model:, name:)
+      return {} unless model.respond_to?(:compressify_attachment_rules)
+
+      rule = model.compressify_attachment_rules[name]
+      return {} unless rule
+
+      record = attachment.record
+      configured = rule.fetch(:options)
+      if_condition = configured[:if]
+      unless_condition = configured[:unless]
+      return nil if if_condition && !if_condition.call(record)
+      return nil if unless_condition && unless_condition.call(record)
+
+      opts = record.send(:compressify_normalize_options, configured.except(:if, :unless).deep_dup)
+      dynamic_opts = rule[:dynamic_opts]
+      if dynamic_opts
+        evaluated = dynamic_opts.call(record)
+        opts = opts.deep_merge(evaluated.deep_symbolize_keys) if evaluated.is_a?(Hash)
+      end
+      opts
+    end
+    private_class_method :model_options
   end
 end
