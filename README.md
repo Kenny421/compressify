@@ -352,7 +352,7 @@ The gemspec targets:
 - Active Job `>= 6.1`
 - Active Storage `>= 6.1`
 
-CI runs the test suite on Ruby `3.1`, `3.2`, and `3.3`.
+CI runs the test suite on Ruby `3.1` (separate Rails 7.1 dependency set), `3.2`, `3.3`, and `3.4`.
 
 ## Local Development
 
