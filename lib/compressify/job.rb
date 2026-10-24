@@ -150,6 +150,11 @@ module Compressify
         %i[auto cache postgres].include?(backend)
       return false if backend == :cache
 
+      unless ActiveStorage::Attachment.respond_to?(:connection_db_config)
+        raise Compressify::Error, "PostgreSQL connection configuration unavailable" if backend == :postgres
+        return false
+      end
+
       config = ActiveStorage::Attachment.connection_db_config
       is_postgres = config && config.adapter.to_s.downcase.include?("postgres")
       raise Compressify::Error, "concurrency_backend=:postgres requires PostgreSQL" if
