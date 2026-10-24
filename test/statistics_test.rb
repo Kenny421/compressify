@@ -30,7 +30,7 @@ class StatisticsTest < Minitest::Test
         "mode" => "image", "source_byte_size" => 1000,
         "compressed_byte_size" => 250, "processing_ms" => 12.5
       } }),
-      FakeBlob.new(key => {
+      FakeBlob.new({ key => {
         "mode" => "video", "source_byte_size" => 10_000,
         "compressed_byte_size" => 5000, "processing_ms" => 37.5
       } }),
