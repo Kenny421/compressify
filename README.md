@@ -280,8 +280,18 @@ output still goes to a separate temporary file before upload.
 By default, `config.skip_larger_output = true` prevents in-place replacement
 when the optimized output would be the same size or larger than the original.
 This applies only to replacement mode: companion attachments created using
-`attach_to:` are still saved, even if larger. If you intentionally need
-format conversion regardless of size, set `skip_larger_output = false`.
+`attach_to:` are still saved, even if larger. For one attachment that **must**
+produce a specific format or exact dimensions, set `allow_larger_output: true`
+in its `auto_compress` options. For example:
+
+```ruby
+auto_compress :avatar, format: :webp, quality: 82, size: "512x512!",
+  allow_larger_output: true
+```
+
+Without this opt-in, a tiny source image can be retained instead of the
+larger 512x512 WebP. Alternatively, to disable the safeguard everywhere,
+set `config.skip_larger_output = false` (not recommended for storage-first apps).
 
 For very large PostgreSQL Active Storage tables, you can opt into an indexed
 fingerprint lookup for derivative reuse. Run this SQL in a **nontransactional**
@@ -300,6 +310,20 @@ If your metadata key differs, use the same key in your index expression.
 Other databases and installs without this setting retain the legacy
 `metadata LIKE` lookup. Do not enable the fast path until the index has
 finished building. The existing metadata must contain valid JSON.
+
+## Active Storage optimistic locking
+
+When replacing a Book/User image, Rails may automatically touch the parent
+record. An attachment job can hold a stale in-memory parent `lock_version`
+after another request updates that record. Compressify refreshes the parent
+before the swap, and retries `ActiveRecord::StaleObjectError` up to three
+times if a concurrent update still occurs. A failed transaction does **not**
+schedule deletion of the original. New files uploaded to storage by the failed
+attempt are cleaned up after rollback when possible.
+
+Original-file purge jobs are enqueued **after** the attachment transaction
+commits, so an asynchronous worker does not incorrectly see the source as
+still attached before the update becomes visible.
 
 ## Retryable original cleanup
 
