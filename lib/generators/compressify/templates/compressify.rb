@@ -13,6 +13,8 @@ Compressify.configure do |config|
 
   # Purge replaced blobs after swap when no other attachment still references them.
   config.purge_original = true
+  # Do not replace a smaller source with a larger optimized file.
+  config.skip_larger_output = true
 
   # Safety cap for blob downloads in the job.
   config.max_download_bytes = 100.megabytes
@@ -35,6 +37,8 @@ Compressify.configure do |config|
   config.adaptive_quality_large_file_bytes = 3.megabytes
   # Reuse already generated derivatives for the same source+options when available.
   config.reuse_existing_derivatives = true
+  # Enable only after creating the PostgreSQL expression index described in README.
+  config.postgres_fingerprint_lookup = false
   # Skip processing when an image already fits resize_to_limit bounds.
   config.skip_if_no_resize_needed = false
 
