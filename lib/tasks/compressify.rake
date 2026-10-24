@@ -31,7 +31,9 @@ namespace :compressify do
       if run_inline && !dry_run
         # Process in this CLI process, including original purge and its
         # Active Storage purge callbacks. Do not change persistent job config.
-        [Compressify::Job, Compressify::PurgeOriginalJob, ActiveStorage::PurgeJob].each do |job_class|
+        classes = [Compressify::Job, Compressify::PurgeOriginalJob]
+        classes << ActiveStorage::PurgeJob if defined?(ActiveStorage::PurgeJob)
+        classes.each do |job_class|
           adapters << [job_class, job_class.queue_adapter]
           job_class.queue_adapter = :inline
         end
