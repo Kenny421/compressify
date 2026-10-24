@@ -1,18 +1,21 @@
 # Compressify
 
-Compressify is a Rails gem for automatically compressing Active Storage uploads in background jobs.
+Compressify is a Rails gem that automatically optimizes Active Storage uploads in background jobs.
 
-Its focus is simple: reduce storage usage without forcing each app to hand-roll a media pipeline.
+Its focus is simple: shrink what you store, not just what you render.
+
+If your app accepts uploads and your storage bill keeps quietly getting bolder, Compressify gives you a repeatable post-upload pipeline without making every Rails app invent one from scratch.
 
 Compressify can:
 
 - Compress uploaded images with `libvips`
-- Optionally transcode uploaded videos with `ffmpeg`
-- Replace the original blob to save storage
-- Keep the original and attach a compressed copy instead
-- Route jobs to separate image and video queues
-- Skip duplicate or stale work
-- Record compression savings in blob metadata
+- Optionally transcode videos with `ffmpeg`
+- Replace the original blob to maximize storage savings
+- Keep the original and attach an optimized copy instead
+- Route image and video work to separate queues
+- Skip stale, duplicate, or already-compressed work
+- Reuse matching derivatives instead of regenerating them
+- Record byte savings in blob metadata
 
 ## Why Use Compressify
 
@@ -27,18 +30,23 @@ Use Compressify when you want:
 - Automatic post-upload optimization
 - A repeatable model-level API instead of controller glue
 
+## Variants vs Compressify
+
+| Concern | Rails variants | Compressify |
+| --- | --- | --- |
+| Optimizes original stored upload | No | Yes |
+| Runs automatically after upload | Usually app-specific | Yes |
+| Replaces original blob safely | No | Yes |
+| Keeps source and writes optimized copy | Manual | Yes |
+| Skips stale or duplicate jobs | Manual | Yes |
+| Tracks byte savings in metadata | No | Yes |
+
 ## Installation
 
 Add the gem:
 
 ```ruby
 gem "compressify"
-```
-
-If you want to install directly from GitHub while iterating before a RubyGems release:
-
-```ruby
-gem "compressify", github: "kenroyreid/compressify"
 ```
 
 Then install dependencies:
@@ -94,13 +102,20 @@ class Photo < ApplicationRecord
 end
 ```
 
-That flow is:
+What happens next:
 
 1. The user uploads the original file.
 2. Compressify enqueues a background job after commit.
 3. The job downloads and processes the blob.
 4. The attachment is swapped to the optimized blob.
 5. The replaced blob is purged later if no other attachment still references it.
+
+## Why Teams Usually Like It
+
+- The API stays close to the model instead of leaking attachment logic into controllers and custom jobs.
+- It is conservative around race conditions, stale jobs, and duplicate work.
+- It works for both "replace the original" and "keep the original" workflows.
+- The metadata shows whether the gem is actually saving storage instead of just feeling productive.
 
 ## Common Model Setups
 
@@ -304,6 +319,25 @@ Compressify is designed to be conservative:
 - Jobs run after commit, so the attachment and blob exist before processing starts
 - Jobs skip stale work if the attachment changed after enqueue
 - Cache-backed idempotency locks reduce duplicate in-flight jobs
+- Image and video concurrency can be limited independently
+- Existing matching derivatives can be reused instead of regenerated
+- Replaced blobs are only purged when no other attachment still references them
+
+## Metadata and Savings
+
+Compressed blobs store metadata under the configured `metadata_key`, including:
+
+- `fingerprint`
+- `mode`
+- `target`
+- `source_blob_key`
+- `source_byte_size`
+- `compressed_byte_size`
+- `bytes_saved`
+- `percent_saved`
+- `processed_at`
+
+That gives you something better than a hunch when you want to prove the gem is saving space.
 - Optional concurrency caps protect workers from media-processing spikes
 - Large downloads can be rejected with `max_download_bytes`
 - Original blobs are only purged after replacement if no other attachments still reference them

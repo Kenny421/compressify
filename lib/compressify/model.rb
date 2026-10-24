@@ -31,7 +31,7 @@ module Compressify
         attachment_name = attachment_name.to_sym
         dynamic_opts = block
 
-        # Mark when this attachment actually changed in the save transaction.
+        # Mark attachment changes during the save transaction so we only enqueue real work.
         after_save do
           begin
             if respond_to?(:attachment_changes) && attachment_changes.is_a?(Hash) && attachment_changes.key?(attachment_name.to_s)
@@ -42,7 +42,7 @@ module Compressify
           end
         end
 
-        # Enqueue after commit so the attachment exists and the blob is real.
+        # Wait until commit so Active Storage has finished its paperwork.
         after_commit(on: Array(only)) do
           next unless Compressify.config.enabled
 
@@ -55,7 +55,7 @@ module Compressify
           attached = public_send(attachment_name)
           next unless attached.respond_to?(:attached?) && attached.attached?
 
-          # Only run if the attachment changed (not on random updates).
+          # Ignore ordinary record updates. Nobody wants image recompression because a title changed.
           next unless compressify_attachment_touched?(attachment_name)
 
           opts = options.except(:if, :unless).deep_dup
@@ -76,7 +76,7 @@ module Compressify
             )
           end
 
-          # Clear marker so we don't fire again on the next unrelated update.
+          # Clear the marker before the next save gets any funny ideas.
           compressify_clear_attachment_touch!(attachment_name)
         end
       end
@@ -85,7 +85,7 @@ module Compressify
     private
 
     # Turn friendly options into processor options.
-    # Because devs like writing `size: "1200x1200"` and servers like eating arrays.
+    # Humans like "1200x1200"; Ruby prefers something it can chew without drama.
     def compressify_normalize_options(opts)
       return {} unless opts.is_a?(Hash)
 
@@ -143,7 +143,7 @@ module Compressify
 
       # Important loop guard:
       # only enqueue when this save transaction explicitly marked the attachment as changed.
-      # This avoids self-triggering loops from our own background attachment swaps touching updated_at.
+      # Otherwise the background job can chase its own tail, which is cute in dogs and bad in jobs.
       false
     rescue StandardError
       false
