@@ -342,7 +342,10 @@ this update cannot retroactively locate all of them.
 Compressify can now enqueue **existing** attachments in bounded, resumable batches
 instead of only handling newly uploaded files. The default is a **dry run**.
 No original blobs are changed directly by the batch scanner: it schedules
-the same idempotent `Compressify::Job` used for regular uploads.
+the same idempotent `Compressify::Job` used for regular uploads. By default,
+the batch uses the model's own `auto_compress` declarations, including its
+format, resize settings, conditions and dynamic option block. Explicit
+`options:` / `OPTIONS_JSON` settings override those declared options.
 
 Preview the first 500 book covers:
 
