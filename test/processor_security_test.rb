@@ -697,6 +697,37 @@ class ProcessorSecurityTest < Minitest::Test
     assert_nil attachment.updated_attrs
   end
 
+  def test_explicit_transform_can_replace_with_larger_output
+    Compressify.config.skip_larger_output = true
+    source_blob = FakeBlob.new("small-avatar", {}, "image/png", nil, 4)
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: Object.new, record_id: 88,
+      record_type: "User", name: "avatar"
+    )
+    processor = Compressify::Processor.new(
+      attachment: attachment, options: { allow_larger_output: true }
+    )
+    processor.instance_variable_set(:@target_name, :avatar)
+    processor.instance_variable_set(:@replace_mode, true)
+
+    replacement = Object.new
+    Tempfile.create(["required-square-avatar-", ".webp"]) do |outfile|
+      outfile.write("123456789")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { replacement }) do
+        processor.send(
+          :attach_output!, source_blob: source_blob, outfile: outfile,
+          filename: "avatar.webp", content_type: "image/webp",
+          fingerprint: "fp-avatar", mode: :image,
+          options_snapshot: { format: :webp, resize_to_fill: [512, 512] }
+        )
+      end
+    end
+
+    assert_equal({ blob: replacement }, attachment.updated_attrs)
+  end
+
   def test_larger_output_is_allowed_when_guard_disabled
     Compressify.config.skip_larger_output = false
     source_blob = FakeBlob.new("small-source", {}, "image/jpeg", nil, 4)
