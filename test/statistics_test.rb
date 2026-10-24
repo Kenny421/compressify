@@ -26,16 +26,16 @@ class StatisticsTest < Minitest::Test
   def test_summary_reports_bytes_savings_from_retained_metadata
     key = Compressify.config.metadata_key
     blobs = [
-      FakeBlob.new(key => {
+      FakeBlob.new({ key => {
         "mode" => "image", "source_byte_size" => 1000,
         "compressed_byte_size" => 250, "processing_ms" => 12.5
-      }),
+      } }),
       FakeBlob.new(key => {
         "mode" => "video", "source_byte_size" => 10_000,
         "compressed_byte_size" => 5000, "processing_ms" => 37.5
-      }),
-      FakeBlob.new(key => { "mode" => "image", "source_byte_size" => "bad" }),
-      FakeBlob.new("other" => "unrelated")
+      } }),
+      FakeBlob.new({ key => { "mode" => "image", "source_byte_size" => "bad" } }),
+      FakeBlob.new({ "other" => "unrelated" })
     ]
     relation = FakeRelation.new(blobs)
     report = Compressify::Statistics.summary(scope: relation, since: Time.utc(2026, 1, 1))
