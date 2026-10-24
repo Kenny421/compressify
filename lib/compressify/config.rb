@@ -10,7 +10,7 @@ module Compressify
                   :adaptive_quality_enabled, :adaptive_quality_min,
                   :adaptive_quality_large_image_pixels, :adaptive_quality_large_file_bytes,
                   :reuse_existing_derivatives, :tempfile_dir,
-                  :skip_if_no_resize_needed
+                  :skip_if_no_resize_needed, :skip_larger_output, :postgres_fingerprint_lookup
 
     def initialize
       # Master switch for background processing.
@@ -34,6 +34,8 @@ module Compressify
 
       # Purge replaced blobs after swap when they are no longer attached.
       @purge_original = true
+      # Avoid replacing a smaller source with a larger compressed file.
+      @skip_larger_output = true
 
       # Safety cap for blob downloads in the job.
       @max_download_bytes = 100.megabytes
@@ -48,6 +50,8 @@ module Compressify
 
       # Reattach an existing derivative for the same source+options when available.
       @reuse_existing_derivatives = true
+      # Opt in after installing the documented PostgreSQL expression index.
+      @postgres_fingerprint_lookup = false
 
       # Optional fast local tmp directory for processing tempfiles.
       @tempfile_dir = ENV["COMPRESSIFY_TMPDIR"].presence
