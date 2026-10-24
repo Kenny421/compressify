@@ -419,10 +419,9 @@ module Compressify
     end
 
     def reusable_blob_candidates(fingerprint)
-      connection = ActiveStorage::Blob.connection
       if Compressify.config.postgres_fingerprint_lookup &&
-          connection.adapter_name.to_s.downcase.include?("postgres")
-        metadata_key = connection.quote(Compressify.config.metadata_key.to_s)
+          ActiveStorage::Blob.connection.adapter_name.to_s.downcase.include?("postgres")
+        metadata_key = ActiveStorage::Blob.connection.quote(Compressify.config.metadata_key.to_s)
         # Requires the matching expression index documented in README.md.
         ActiveStorage::Blob.where(
           "(metadata::jsonb -> #{metadata_key} ->> 'fingerprint') = ?",
