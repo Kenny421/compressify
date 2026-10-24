@@ -292,6 +292,15 @@ module Compressify
       source_byte_size = blob_byte_size(source_blob)
       savings = compression_savings(source_bytes: source_byte_size, output_bytes: output_byte_size)
 
+      if @replace_mode && Compressify.config.skip_larger_output &&
+          source_byte_size && output_byte_size >= source_byte_size
+        log_info(
+          "Skip larger output attachment_id=#{attachment_id_for_log} " \
+          "source_bytes=#{source_byte_size} output_bytes=#{output_byte_size}"
+        )
+        return false
+      end
+
       meta_key = Compressify.config.metadata_key.to_s
       new_metadata = (source_blob.metadata || {}).dup
       new_metadata[meta_key] = {
@@ -374,7 +383,8 @@ module Compressify
       return unless old_blob
       # Only purge if nobody else is using it.
       if old_blob.attachments.reload.none?
-        old_blob.purge_later
+        # Delete from storage before destroying the DB record so failures remain retryable.
+        Compressify::PurgeOriginalJob.perform_later(blob_id: old_blob.id)
       end
     rescue => e
       log_warn("Could not purge old blob (continuing) old_blob_id=#{old_blob&.id} error=#{e.class}: #{e.message}")
@@ -396,8 +406,7 @@ module Compressify
     end
 
     def reusable_blob_for(fingerprint:, mode:, exclude_blob_id: nil)
-      pattern = %("fingerprint":"#{fingerprint}")
-      candidates = ActiveStorage::Blob.where("metadata LIKE ?", "%#{pattern}%")
+      candidates = reusable_blob_candidates(fingerprint)
       candidates = candidates.where.not(id: exclude_blob_id) if exclude_blob_id && candidates.respond_to?(:where)
 
       candidates.find do |candidate|
@@ -406,6 +415,22 @@ module Compressify
 
         meta["fingerprint"].to_s == fingerprint.to_s &&
           meta["mode"].to_s == mode.to_s
+      end
+    end
+
+    def reusable_blob_candidates(fingerprint)
+      connection = ActiveStorage::Blob.connection
+      if Compressify.config.postgres_fingerprint_lookup &&
+          connection.adapter_name.to_s.downcase.include?("postgres")
+        metadata_key = connection.quote(Compressify.config.metadata_key.to_s)
+        # Requires the matching expression index documented in README.md.
+        ActiveStorage::Blob.where(
+          "(metadata::jsonb -> #{metadata_key} ->> 'fingerprint') = ?",
+          fingerprint
+        )
+      else
+        pattern = %("fingerprint":"#{fingerprint}")
+        ActiveStorage::Blob.where("metadata LIKE ?", "%#{pattern}%")
       end
     end
 
