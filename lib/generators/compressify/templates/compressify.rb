@@ -60,6 +60,7 @@ Compressify.configure do |config|
     audio_codec: "aac",
     crf: 28,
     preset: "medium",
+    threads: nil,                # optional FFmpeg encoder threads (e.g., 2)
     max_width: nil,
     max_height: nil,
     extra_args: []
