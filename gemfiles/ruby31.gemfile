@@ -1,0 +1,11 @@
+source "https://rubygems.org"
+
+# Ruby 3.1 cannot install Rails 8.1 from the default lockfile.
+# Run the gem test suite against the last supported Rails 7.1 series instead.
+gemspec path: ".."
+
+gem "activesupport", "~> 7.1.0"
+gem "activejob", "~> 7.1.0"
+gem "activestorage", "~> 7.1.0"
+gem "connection_pool", "< 3"
+gem "minitest", "< 6"
