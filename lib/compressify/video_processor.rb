@@ -15,12 +15,10 @@ module Compressify
 
       require "streamio-ffmpeg"
 
-      input_ext = blob.filename.extension_without_delimiter.to_s.downcase
       out_format = opts[:format].to_s.downcase.presence || "mp4"
 
-      Tempfile.create(["compressify-in-", ".#{input_ext}"], context_send(:tempfile_dir)) do |infile|
-        context_send(:download_blob_to_tempfile, blob, infile)
-
+      # Active Storage already downloads into a verified tempfile. Avoid a second disk copy.
+      blob.open(tmpdir: context_send(:tempfile_dir)) do |infile|
         Tempfile.create(["compressify-out-", ".#{out_format}"], context_send(:tempfile_dir)) do |outfile|
           outfile.binmode
 
@@ -56,6 +54,7 @@ module Compressify
       args = []
       args += ["-preset", opts[:preset].to_s] if opts[:preset].present?
       args += ["-crf", opts[:crf].to_i.to_s] if opts[:crf].present?
+      args += ["-threads", opts[:threads].to_i.to_s] if opts[:threads].to_i.positive?
 
       scale = build_scale(opts)
       args += ["-vf", scale] if scale.present?

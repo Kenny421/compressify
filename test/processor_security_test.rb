@@ -78,6 +78,8 @@ class ProcessorSecurityTest < Minitest::Test
     @original_adaptive_bytes = Compressify.config.adaptive_quality_large_file_bytes
     @original_reuse = Compressify.config.reuse_existing_derivatives
     @original_skip_resize = Compressify.config.skip_if_no_resize_needed
+    @original_skip_larger = Compressify.config.skip_larger_output
+    @original_pg_lookup = Compressify.config.postgres_fingerprint_lookup
   end
 
   def teardown
@@ -89,6 +91,8 @@ class ProcessorSecurityTest < Minitest::Test
     Compressify.config.adaptive_quality_large_file_bytes = @original_adaptive_bytes
     Compressify.config.reuse_existing_derivatives = @original_reuse
     Compressify.config.skip_if_no_resize_needed = @original_skip_resize
+    Compressify.config.skip_larger_output = @original_skip_larger
+    Compressify.config.postgres_fingerprint_lookup = @original_pg_lookup
   end
 
   def test_active_storage_target_for_rejects_non_attachment_target
@@ -215,6 +219,17 @@ class ProcessorSecurityTest < Minitest::Test
     )
 
     assert_equal ["-preset", "slow", "-crf", "24", "-vf", "scale='min(1280,iw)':-2"], args
+  end
+
+  def test_ffmpeg_custom_args_limits_video_threads_when_configured
+    attachment = FakeAttachment.new(
+      blob: FakeBlob.new("source-key", {}, "video/mp4", nil),
+      record: Object.new, record_id: 10, record_type: "Video", name: "clip"
+    )
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+
+    args = processor.send(:ffmpeg_custom_args, { crf: 28, threads: 2 })
+    assert_equal ["-crf", "28", "-threads", "2"], args
   end
 
   def test_ffmpeg_custom_args_stringifies_array_values_safely
@@ -652,6 +667,201 @@ class ProcessorSecurityTest < Minitest::Test
     processor = Compressify::Processor.new(attachment: attachment, options: {})
 
     refute processor.send(:skip_if_no_resize_needed?, blob, opts)
+  end
+
+  def test_attach_output_skips_larger_in_place_replacement
+    Compressify.config.skip_larger_output = true
+    source_blob = FakeBlob.new("small-source", {}, "image/jpeg", nil, 4)
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: Object.new, record_id: 88,
+      record_type: "Photo", name: "image"
+    )
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+    processor.instance_variable_set(:@target_name, :image)
+    processor.instance_variable_set(:@replace_mode, true)
+
+    Tempfile.create(["larger-output-", ".jpg"]) do |outfile|
+      outfile.write("123456789")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { flunk "should not upload larger file" }) do
+        result = processor.send(
+          :attach_output!, source_blob: source_blob, outfile: outfile,
+          filename: "output.jpg", content_type: "image/jpeg",
+          fingerprint: "fp-large", mode: :image, options_snapshot: { quality: 80 }
+        )
+        assert_equal false, result
+      end
+    end
+
+    assert_nil attachment.updated_attrs
+  end
+
+  def test_explicit_transform_can_replace_with_larger_output
+    Compressify.config.skip_larger_output = true
+    source_blob = FakeBlob.new("small-avatar", {}, "image/png", nil, 4)
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: Object.new, record_id: 88,
+      record_type: "User", name: "avatar"
+    )
+    processor = Compressify::Processor.new(
+      attachment: attachment, options: { allow_larger_output: true }
+    )
+    processor.instance_variable_set(:@target_name, :avatar)
+    processor.instance_variable_set(:@replace_mode, true)
+
+    replacement = Object.new
+    Tempfile.create(["required-square-avatar-", ".webp"]) do |outfile|
+      outfile.write("123456789")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { replacement }) do
+        processor.send(
+          :attach_output!, source_blob: source_blob, outfile: outfile,
+          filename: "avatar.webp", content_type: "image/webp",
+          fingerprint: "fp-avatar", mode: :image,
+          options_snapshot: { format: :webp, resize_to_fill: [512, 512] }
+        )
+      end
+    end
+
+    assert_equal({ blob: replacement }, attachment.updated_attrs)
+  end
+
+  def test_larger_output_is_allowed_when_guard_disabled
+    Compressify.config.skip_larger_output = false
+    source_blob = FakeBlob.new("small-source", {}, "image/jpeg", nil, 4)
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: Object.new, record_id: 88,
+      record_type: "Photo", name: "image"
+    )
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+    processor.instance_variable_set(:@target_name, :image)
+    processor.instance_variable_set(:@replace_mode, true)
+
+    replacement = Object.new
+    Tempfile.create(["larger-allowed-", ".jpg"]) do |outfile|
+      outfile.write("123456789")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { replacement }) do
+        processor.send(
+          :attach_output!, source_blob: source_blob, outfile: outfile,
+          filename: "output.jpg", content_type: "image/jpeg",
+          fingerprint: "fp-large", mode: :image, options_snapshot: { quality: 80 }
+        )
+      end
+    end
+
+    assert_equal({ blob: replacement }, attachment.updated_attrs)
+  end
+
+  def test_reusable_blob_uses_indexed_postgres_query_when_enabled
+    Compressify.config.postgres_fingerprint_lookup = true
+    fp = "abc123"
+    matching = Struct.new(:id, :metadata).new(
+      72, { Compressify.config.metadata_key => { "fingerprint" => fp, "mode" => "image" } }
+    )
+    connection = Object.new
+    connection.define_singleton_method(:adapter_name) { "PostgreSQL" }
+    connection.define_singleton_method(:quote) { |val| "'#{val}'" }
+
+    attachment = FakeAttachment.new(
+      blob: FakeBlob.new("source", {}, "image/png", nil),
+      record: Object.new, record_id: 6, record_type: "Photo", name: "image"
+    )
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+
+    queried = nil
+    patch_class_method(ActiveStorage::Blob, :connection, -> { connection }) do
+      patch_class_method(ActiveStorage::Blob, :where, ->(*args) { queried = args; [matching] }) do
+        assert_same matching, processor.send(:reusable_blob_for, fingerprint: fp, mode: :image)
+      end
+    end
+
+    assert_includes queried.first, "metadata::jsonb"
+    assert_includes queried.first, "'compressify'"
+    assert_equal fp, queried.last
+  end
+
+  def test_replacement_refreshes_stale_owner_before_attachment_touch
+    source_blob = FakeBlob.new("stale-source", {}, "image/jpeg", nil, 100)
+    record = Object.new
+    record.define_singleton_method(:persisted?) { true }
+    record.define_singleton_method(:reload) { @was_reloaded = true; self }
+    record.define_singleton_method(:reloaded?) { @was_reloaded }
+
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: record, record_id: 65,
+      record_type: "Book", name: "cover_image"
+    )
+    attachment.define_singleton_method(:update!) do |attrs|
+      raise ActiveRecord::StaleObjectError.new(record, "touch") unless record.reloaded?
+      @updated_attrs = attrs
+    end
+
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+    processor.instance_variable_set(:@target_name, :cover_image)
+    processor.instance_variable_set(:@replace_mode, true)
+    replacement = Object.new
+
+    Tempfile.create(["compressify-reload-", ".webp"]) do |outfile|
+      outfile.write("short")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { replacement }) do
+        processor.send(
+          :attach_output!, source_blob: source_blob, outfile: outfile,
+          filename: "cover.webp", content_type: "image/webp",
+          fingerprint: "fp-lock", mode: :image, options_snapshot: { quality: 82 }
+        )
+      end
+    end
+
+    assert record.reloaded?
+    assert_equal({ blob: replacement }, attachment.updated_attrs)
+  end
+
+  def test_failed_transaction_cleanup_deletes_uncommitted_storage_file
+    source_blob = FakeBlob.new("source", {}, "image/jpeg", nil, 100)
+    attachment = FakeAttachment.new(
+      blob: source_blob, record: Object.new, record_id: 65,
+      record_type: "Book", name: "cover_image"
+    )
+    attachment.define_singleton_method(:update!) do |_attrs|
+      raise ActiveRecord::StaleObjectError.new(record, "touch")
+    end
+
+    processor = Compressify::Processor.new(attachment: attachment, options: {})
+    processor.instance_variable_set(:@target_name, :cover_image)
+    processor.instance_variable_set(:@replace_mode, true)
+
+    deleted_keys = []
+    storage = Object.new
+    storage.define_singleton_method(:delete) { |key| deleted_keys << key }
+    replacement = Object.new
+    replacement.define_singleton_method(:key) { "rolled-back-key" }
+    replacement.define_singleton_method(:service) { storage }
+
+    Tempfile.create(["compressify-rollback-", ".webp"]) do |outfile|
+      outfile.write("short")
+      outfile.flush
+
+      patch_class_method(ActiveStorage::Blob, :create_and_upload!, ->(**_kwargs) { replacement }) do
+        assert_raises(ActiveRecord::StaleObjectError) do
+          processor.send(
+            :attach_output!, source_blob: source_blob, outfile: outfile,
+            filename: "cover.webp", content_type: "image/webp",
+            fingerprint: "fp-lock", mode: :image, options_snapshot: {}
+          )
+        end
+      end
+    end
+
+    assert_equal [], deleted_keys
+    processor.cleanup_failed_outputs!
+    assert_equal ["rolled-back-key"], deleted_keys
+    assert_equal [], processor.pending_purge_blob_ids
   end
 
   private

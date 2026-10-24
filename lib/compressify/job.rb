@@ -17,42 +17,55 @@ module Compressify
     ].freeze
 
     retry_on(*TRANSIENT_ERRORS, wait: :exponentially_longer, attempts: 5)
+    retry_on ActiveRecord::StaleObjectError, wait: 2.seconds, attempts: 3
     discard_on ActiveRecord::RecordNotFound if defined?(ActiveRecord::RecordNotFound)
 
     # attachment_id: ActiveStorage::Attachment id
     # blob_id: expected blob id at enqueue time (stale job guard)
     # options: hash for processor (format/quality/etc + attach_to)
     def perform(attachment_id:, blob_id: nil, options: {})
+      @processor = nil
       attachment = ActiveStorage::Attachment.find_by(id: attachment_id)
       return unless attachment
 
       # Serialize jobs per attachment row so two workers do not "help" at the same time.
-      attachment.with_lock do
-        # If the blob changed since enqueue, this job missed its moment.
-        if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
-          log_info("Skip stale job attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
-          next
-        end
+      begin
+        attachment.with_lock do
+          # If the blob changed since enqueue, this job missed its moment.
+          if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
+            log_info("Skip stale job attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
+            next
+          end
 
-        lock_key = processing_lock_key(attachment: attachment, options: options)
-        with_processing_lock(lock_key) do
-          with_media_concurrency_slot(attachment, blob_id: blob_id, options: options) do
-            # Re-check inside the lock. Queues are fast, but not psychic.
-            if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
-              log_info("Skip stale job inside lock attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
-              next
+          lock_key = processing_lock_key(attachment: attachment, options: options)
+          with_processing_lock(lock_key) do
+            with_media_concurrency_slot(attachment, blob_id: blob_id, options: options) do
+              # Re-check inside the lock. Queues are fast, but not psychic.
+              if blob_id.present? && attachment.blob_id.to_i != blob_id.to_i
+                log_info("Skip stale job inside lock attachment_id=#{attachment.id} expected_blob_id=#{blob_id} current_blob_id=#{attachment.blob_id}")
+                next
+              end
+
+              run_processor(attachment, options)
             end
-
-            run_processor(attachment, options)
           end
         end
+      rescue StandardError
+        # The DB transaction has rolled back; clean up new media that was
+        # uploaded to a nontransactional storage service before the error.
+        @processor&.cleanup_failed_outputs!
+        raise
       end
+
+      # Never enqueue the purge before the replacement transaction commits.
+      @processor&.enqueue_pending_purges!
     end
 
     private
 
     def run_processor(attachment, options)
-      Compressify::Processor.new(attachment: attachment, options: options).call
+      @processor = Compressify::Processor.new(attachment: attachment, options: options)
+      @processor.call
     end
 
     def processing_lock_key(attachment:, options:)

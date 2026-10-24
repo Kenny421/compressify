@@ -28,6 +28,29 @@ module Compressify
     def initialize(attachment:, options: {})
       @attachment = attachment
       @options = (options || {}).deep_symbolize_keys
+      @pending_purge_blob_ids = []
+      @uploaded_blobs = []
+    end
+
+    attr_reader :pending_purge_blob_ids
+
+    # Only called by the job after the attachment transaction has committed.
+    def enqueue_pending_purges!
+      pending_purge_blob_ids.uniq.each do |blob_id|
+        Compressify::PurgeOriginalJob.perform_later(blob_id: blob_id)
+      end
+    end
+
+    # Called after a failed transaction has rolled back, including a stale-record
+    # failure. The blob DB rows roll back, but the storage upload may not.
+    def cleanup_failed_outputs!
+      @uploaded_blobs.each do |blob|
+        begin
+          blob.service.delete(blob.key)
+        rescue StandardError => e
+          log_warn("Failed to clean up rolled-back upload key=#{blob.key} error=#{e.class}: #{e.message}")
+        end
+      end
     end
 
     def call
@@ -295,6 +318,16 @@ module Compressify
       source_byte_size = blob_byte_size(source_blob)
       savings = compression_savings(source_bytes: source_byte_size, output_bytes: output_byte_size)
 
+      if @replace_mode && Compressify.config.skip_larger_output &&
+          @options[:allow_larger_output] != true &&
+          source_byte_size && output_byte_size >= source_byte_size
+        log_info(
+          "Skip larger output attachment_id=#{attachment_id_for_log} " \
+          "source_bytes=#{source_byte_size} output_bytes=#{output_byte_size}"
+        )
+        return false
+      end
+
       meta_key = Compressify.config.metadata_key.to_s
       new_metadata = (source_blob.metadata || {}).dup
       new_metadata[meta_key] = {
@@ -320,10 +353,12 @@ module Compressify
         identify: false
       )
 
+      @uploaded_blobs << new_blob
       record = @attachment.record
 
       if @replace_mode
         old_blob = @attachment.blob
+        refresh_attachment_record_for_swap!(record)
         @attachment.update!(blob: new_blob)
 
         maybe_purge_old_blob(old_blob) if Compressify.config.purge_original
@@ -375,12 +410,18 @@ module Compressify
 
     def maybe_purge_old_blob(old_blob)
       return unless old_blob
-      # Only purge if nobody else is using it.
-      if old_blob.attachments.reload.none?
-        old_blob.purge_later
-      end
+      # Queue only after a successful commit in Compressify::Job. Enqueueing
+      # inside attachment.with_lock races the transaction and can miss purges.
+      @pending_purge_blob_ids << old_blob.id if old_blob.attachments.reload.none?
     rescue => e
-      log_warn("Could not purge old blob (continuing) old_blob_id=#{old_blob&.id} error=#{e.class}: #{e.message}")
+      log_warn("Could not queue old blob for purge old_blob_id=#{old_blob&.id} error=#{e.class}: #{e.message}")
+    end
+
+    def refresh_attachment_record_for_swap!(record)
+      # ActiveStorage::Attachment belongs_to(:record, touch: true) can attempt
+      # to touch a cached Book/User with an outdated optimistic-lock version.
+      # Reload immediately before swapping to use its current lock_version.
+      record.reload if record.respond_to?(:persisted?) && record.persisted? && record.respond_to?(:reload)
     end
 
     def try_reuse_derivative!(source_blob:, mode:, options_snapshot:)
@@ -399,8 +440,7 @@ module Compressify
     end
 
     def reusable_blob_for(fingerprint:, mode:, exclude_blob_id: nil)
-      pattern = %("fingerprint":"#{fingerprint}")
-      candidates = ActiveStorage::Blob.where("metadata LIKE ?", "%#{pattern}%")
+      candidates = reusable_blob_candidates(fingerprint)
       candidates = candidates.where.not(id: exclude_blob_id) if exclude_blob_id && candidates.respond_to?(:where)
 
       candidates.find do |candidate|
@@ -412,6 +452,21 @@ module Compressify
       end
     end
 
+    def reusable_blob_candidates(fingerprint)
+      if Compressify.config.postgres_fingerprint_lookup &&
+          ActiveStorage::Blob.connection.adapter_name.to_s.downcase.include?("postgres")
+        metadata_key = ActiveStorage::Blob.connection.quote(Compressify.config.metadata_key.to_s)
+        # Requires the matching expression index documented in README.md.
+        ActiveStorage::Blob.where(
+          "(metadata::jsonb -> #{metadata_key} ->> 'fingerprint') = ?",
+          fingerprint
+        )
+      else
+        pattern = %("fingerprint":"#{fingerprint}")
+        ActiveStorage::Blob.where("metadata LIKE ?", "%#{pattern}%")
+      end
+    end
+
     def attach_existing_blob!(source_blob:, existing_blob:, mode:, options_snapshot:, fingerprint:)
       record = @attachment.record
 
@@ -419,6 +474,7 @@ module Compressify
         old_blob = @attachment.blob
         return if old_blob&.id == existing_blob.id
 
+        refresh_attachment_record_for_swap!(record)
         @attachment.update!(blob: existing_blob)
         maybe_purge_old_blob(old_blob) if Compressify.config.purge_original
       else

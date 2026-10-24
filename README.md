@@ -258,6 +258,8 @@ Important production settings:
 - `config.max_download_bytes`
 - `config.tempfile_dir`
 - `config.reuse_existing_derivatives`
+- `config.skip_larger_output`
+- `config.postgres_fingerprint_lookup` (opt-in, PostgreSQL only)
 
 Recommended production pattern:
 
@@ -265,6 +267,74 @@ Recommended production pattern:
 - Keep video concurrency lower than image concurrency
 - Point `tempfile_dir` at fast local storage if large uploads are common
 - Leave dedupe and stale-job protections enabled
+- Set conservative worker counts to fit your CPU/RAM budget (for example, start at 1 FFmpeg job on a small VPS)
+- Optionally set `video: { threads: 2 }` (or `config.default_video_options[:threads] = 2`) to cap FFmpeg encoder threads per job
+- Benchmark different FFmpeg presets/CRF values rather than expecting faster encoding solely from Ruby changes
+
+## Storage safeguards and faster PostgreSQL reuse lookups
+
+Compressify now uses the verified tempfile yielded by `ActiveStorage::Blob#open`
+rather than copying the downloaded source into another tempfile. The optimized
+output still goes to a separate temporary file before upload.
+
+By default, `config.skip_larger_output = true` prevents in-place replacement
+when the optimized output would be the same size or larger than the original.
+This applies only to replacement mode: companion attachments created using
+`attach_to:` are still saved, even if larger. For one attachment that **must**
+produce a specific format or exact dimensions, set `allow_larger_output: true`
+in its `auto_compress` options. For example:
+
+```ruby
+auto_compress :avatar, format: :webp, quality: 82, size: "512x512!",
+  allow_larger_output: true
+```
+
+Without this opt-in, a tiny source image can be retained instead of the
+larger 512x512 WebP. Alternatively, to disable the safeguard everywhere,
+set `config.skip_larger_output = false` (not recommended for storage-first apps).
+
+For very large PostgreSQL Active Storage tables, you can opt into an indexed
+fingerprint lookup for derivative reuse. Run this SQL in a **nontransactional**
+database migration (or a supervised maintenance session):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS
+  index_active_storage_blobs_on_compressify_fingerprint
+ON active_storage_blobs
+  (((metadata::jsonb -> 'compressify' ->> 'fingerprint')));
+```
+
+After the index exists, set `config.postgres_fingerprint_lookup = true`.
+This fast path requires PostgreSQL and the default `metadata_key: "compressify"`.
+If your metadata key differs, use the same key in your index expression.
+Other databases and installs without this setting retain the legacy
+`metadata LIKE` lookup. Do not enable the fast path until the index has
+finished building. The existing metadata must contain valid JSON.
+
+## Active Storage optimistic locking
+
+When replacing a Book/User image, Rails may automatically touch the parent
+record. An attachment job can hold a stale in-memory parent `lock_version`
+after another request updates that record. Compressify refreshes the parent
+before the swap, and retries `ActiveRecord::StaleObjectError` up to three
+times if a concurrent update still occurs. A failed transaction does **not**
+schedule deletion of the original. New files uploaded to storage by the failed
+attempt are cleaned up after rollback when possible.
+
+Original-file purge jobs are enqueued **after** the attachment transaction
+commits, so an asynchronous worker does not incorrectly see the source as
+still attached before the update becomes visible.
+
+## Retryable original cleanup
+
+Replaced original blobs are scheduled for `Compressify::PurgeOriginalJob`.
+The job checks that no attachments reference the blob, then deletes the
+underlying storage object **before** destroying its database record.
+If storage deletion fails, the record remains and the job retries (up to
+five attempts, 30 seconds apart). Shared originals are deliberately preserved.
+Keep your Active Job worker running and monitor exhausted retries. Already
+orphaned objects from older gem versions require a separate storage audit;
+this update cannot retroactively locate all of them.
 
 ## Failure Behavior and Safety
 
@@ -340,7 +410,7 @@ The gemspec targets:
 - Active Job `>= 6.1`
 - Active Storage `>= 6.1`
 
-CI runs the test suite on Ruby `3.1`, `3.2`, and `3.3`.
+CI runs the test suite on Ruby `3.1` (separate Rails 7.1 dependency set), `3.2`, `3.3`, and `3.4`.
 
 ## Local Development
 
